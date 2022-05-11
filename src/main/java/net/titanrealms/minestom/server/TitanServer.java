@@ -45,7 +45,7 @@ public class TitanServer {
         return this.minecraftServer;
     }
 
-    public LanguageManager getLanguageManager() {
+    public @NotNull LanguageManager getLanguageManager() {
         return this.languageManager;
     }
 }

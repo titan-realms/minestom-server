@@ -17,18 +17,16 @@ public class DisconnectScreenUtils {
     public static Component create(LanguageManager languageManager, Punishment punishment) {
         Component punishmentLine = createPunishmentLine(languageManager, punishment);
 
-        Component thing = languageManager.get(ServerType.GLOBAL, "punishment-disconnect-message",
+        return languageManager.get(ServerType.GLOBAL, "punishment-disconnect-message",
                 Placeholder.component("punishment_line", punishmentLine),
-                Placeholder.component("id", Component.text(punishment.getId())),
+                Placeholder.component("id", Component.text(punishment.getId().toHexString())),
                 Placeholder.component("reason", Component.text(punishment.getReason())));
-        return thing;
     }
 
     private static Component createPunishmentLine(LanguageManager languageManager, Punishment punishment) {
         Component punishmentLine;
         if (punishment.getPunishmentType() == PunishmentType.BAN) {
-            boolean permanent = punishment.getExpiry().equals(DurationPunishmentCommand.MAX_INSTANT);
-            if (permanent) {
+            if (punishment.isPermanent()) {
                 punishmentLine = languageManager.get(ServerType.GLOBAL, "punishment-disconnect-ban-line-permanent");
             } else {
                 punishmentLine = languageManager.get(ServerType.GLOBAL, "punishment-disconnect-ban-line",

@@ -7,22 +7,18 @@ import net.minestom.server.command.CommandSender;
 import net.minestom.server.command.builder.Command;
 import net.minestom.server.command.builder.CommandContext;
 import net.minestom.server.command.builder.arguments.ArgumentString;
-import net.minestom.server.command.builder.arguments.ArgumentWord;
 import net.minestom.server.command.builder.arguments.minecraft.ArgumentTime;
-import net.minestom.server.command.builder.suggestion.Suggestion;
-import net.minestom.server.command.builder.suggestion.SuggestionEntry;
 import net.minestom.server.entity.Player;
 import net.titanrealms.api.client.TitanApi;
 import net.titanrealms.api.client.model.punishment.Punishment;
 import net.titanrealms.api.client.model.punishment.PunishmentType;
 import net.titanrealms.api.client.model.server.ServerType;
-import net.titanrealms.api.client.model.spring.Page;
-import net.titanrealms.api.client.model.spring.Pageable;
 import net.titanrealms.api.client.modules.playerdata.PlayerDataApi;
 import net.titanrealms.api.client.modules.punishments.PunishmentApi;
 import net.titanrealms.minestom.server.module.language.LanguageManager;
 import net.titanrealms.minestom.server.module.punishments.DisconnectScreenUtils;
 import net.titanrealms.minestom.server.utils.DurationFormatter;
+import net.titanrealms.minestom.server.utils.argument.ArgumentApiPlayer;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -30,15 +26,11 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Date;
-import java.util.Locale;
-import java.util.UUID;
 
 public class DurationPunishmentCommand extends Command {
-    public static final Instant MAX_INSTANT = new Date(7255353600000L).toInstant();
     private static final Logger LOGGER = LoggerFactory.getLogger(DurationPunishmentCommand.class);
 
-    private final ArgumentWord playerArgument;
+    private final ArgumentApiPlayer playerArgument;
     private final ArgumentTime durationArgument = new ArgumentTime("duration");
 
     private final PunishmentType punishmentType;
@@ -56,8 +48,7 @@ public class DurationPunishmentCommand extends Command {
         this.playerDataApi = api.getPlayerDataApi();
         this.languageManager = languageManager;
 
-        this.playerArgument = new ArgumentWord("target");
-        this.playerArgument.setSuggestionCallback(this::suggestPlayer);
+        this.playerArgument = new ArgumentApiPlayer("target", this.playerDataApi);
 
         this.timeOption = timeOption;
         this.langPrefix = "command-" + command + "-";
@@ -69,21 +60,6 @@ public class DurationPunishmentCommand extends Command {
         if (timeOption) this.addSyntax(this::execute, this.playerArgument, this.durationArgument, reasonArgument);
     }
 
-    private void suggestPlayer(@NotNull CommandSender sender, @NotNull CommandContext context, @NotNull Suggestion suggestion) {
-        String input = context.getRaw(this.playerArgument);
-
-        MinecraftServer.getConnectionManager().getOnlinePlayers().stream().map(Player::getUsername)
-                .filter(username -> input == null || username.toLowerCase(Locale.ROOT).contains(input.toLowerCase(Locale.ROOT))).map(SuggestionEntry::new).forEach(suggestion::addEntry);
-
-        if (input == null)
-            return; // we don't want to query the DB if no name is specified, but online players are cheap.
-
-        // todo what if there's a high response time?
-        this.playerDataApi.searchPlayerDataByUsername(input, Pageable.of(0, 10)).thenApply(Page::content).thenAccept(list -> {
-            list.forEach(playerData -> suggestion.addEntry(new SuggestionEntry(playerData.username())));
-        }).join();
-    }
-
     private void helpCommand(CommandSender sender, CommandContext context) {
         sender.sendMessage(this.languageManager.get(ServerType.GLOBAL, this.langPrefix + "help")
                 .append(Component.newline())
@@ -91,31 +67,25 @@ public class DurationPunishmentCommand extends Command {
     }
 
     // todo logic for overwriting existing punishment
-    // todo the timestamp field is unnecessary, use the ID.
     private void execute(CommandSender sender, CommandContext context) {
-        String targetUsername = context.get(this.playerArgument);
-
-        Player onlineTarget = MinecraftServer.getConnectionManager().getPlayer(targetUsername);
-        UUID targetId;
-        if (onlineTarget == null) { // get from api if not online
-            targetId = this.playerDataApi.retrievePlayerDataByUsername(targetUsername).thenApply(playerData -> playerData == null ? null : playerData.id()).join();
-            if (targetId == null) {
+        String targetUsername = context.getRaw(this.playerArgument);
+        context.get(this.playerArgument).thenAccept(playerData -> {
+            if (playerData == null) {
                 sender.sendMessage(this.languageManager.get(ServerType.GLOBAL, "player-not-found", Placeholder.component("name", Component.text(targetUsername))));
                 return;
             }
-        } else {
-            targetId = onlineTarget.getUuid();
-        }
 
-        String reason = context.get("reason");
+            Player onlineTarget = MinecraftServer.getConnectionManager().getPlayer(playerData.id());
 
-        Instant nowInstant = Instant.now();
-        Duration duration = context.get(this.durationArgument);
-        Instant endTime = duration == null ? MAX_INSTANT : nowInstant.plusMillis(duration.toMillis()); // We use LocalDateTime.MAX because Instant.MAX is greater than the max supported Date.
+            String reason = context.get("reason");
+            Instant nowInstant = Instant.now();
+            Duration duration = context.get(this.durationArgument);
+            Instant endTime = duration == null ? null : nowInstant.plusMillis(duration.toMillis());
 
-        Punishment punishment = new Punishment(this.punishmentType, nowInstant, endTime, null, targetId, reason, onlineTarget != null);
-        this.punishmentApi.createPunishment(punishment)
-                .whenComplete((punishment1, throwable) -> this.onCompletion(sender, punishment1, throwable, targetUsername, onlineTarget));
+            Punishment punishment = new Punishment(this.punishmentType, endTime, null, playerData.id(), reason, onlineTarget != null);
+            this.punishmentApi.createPunishment(punishment)
+                    .whenComplete((punishment1, throwable) -> this.onCompletion(sender, punishment1, throwable, playerData.username(), onlineTarget));
+        });
     }
 
     private void onCompletion(@NotNull CommandSender sender, Punishment punishment, Throwable throwable, String name, @Nullable Player onlineTarget) {
@@ -125,7 +95,7 @@ public class DurationPunishmentCommand extends Command {
             return;
         }
         Component confirmationMessage;
-        if (this.timeOption && punishment.getExpiry().equals(MAX_INSTANT)) {
+        if (this.timeOption && punishment.isPermanent()) {
             confirmationMessage = this.languageManager.get(ServerType.GLOBAL, this.langPrefix + "success-permanent",
                     Placeholder.component("name", Component.text(name)),
                     Placeholder.component("reason", Component.text(punishment.getReason())));
@@ -133,7 +103,7 @@ public class DurationPunishmentCommand extends Command {
             confirmationMessage = this.languageManager.get(ServerType.GLOBAL, this.langPrefix + "success",
                     Placeholder.component("duration", Component.text(DurationFormatter.toGreatestUnit(Duration.between(punishment.getTimestamp(), punishment.getExpiry())))),
                     Placeholder.component("name", Component.text(name)),
-                    Placeholder.component("reason", Component.text(punishment.getReason()))); // todo format
+                    Placeholder.component("reason", Component.text(punishment.getReason())));
         } else {
             confirmationMessage = this.languageManager.get(ServerType.GLOBAL, this.langPrefix + "success",
                     Placeholder.component("name", Component.text(name)),
